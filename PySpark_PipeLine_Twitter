@@ -1,0 +1,56 @@
+from pyspark.sql import SparkSession
+from pyspark.sql import SQLContext
+
+spark = SparkSession.builder.appName('nlp').getOrCreate()
+train_tweets = spark.read.format('com.databricks.spark.csv').options(header='false', inferschema='true',sep=',').load('training_small.csv')
+
+train_tweets = train_tweets.withColumnRenamed('_c0','label').withColumnRenamed('_c1','id').withColumnRenamed('_c2','timestamp').withColumnRenamed('_c4','userid').withColumnRenamed('_c5','text')
+
+import re
+from pyspark.sql.functions import udf
+from pyspark.sql.types import BooleanType
+import string
+
+emoticons_str = r"""
+    (?:
+        [:=;] # Eyes
+        [oO\-]? # Nose (optional)
+        [D\)\]\(\]/\\OpP] # Mouth
+    )"""
+ 
+regex_str = [
+    emoticons_str,
+    r'<[^>]+>', # HTML tags
+    r'(?:@[\w_]+)', # @-mentions
+    r"(?:\#+[\w_]+[\w\'_\-]*[\w_]+)", # hash-tags
+    r'http[s]?://(?:[a-z]|[0-9]|[$-_@.&amp;+]|[!*\(\),]|(?:%[0-9a-f][0-9a-f]))+' # URLs
+    r' +'
+   
+]
+
+from pyspark.ml.feature import Tokenizer,RegexTokenizer, StopWordsRemover, CountVectorizer, IDF
+repat = r'('+'|'.join(regex_str)+')'
+regex_re = RegexTokenizer(inputCol='text',outputCol='token_text_re', pattern= repat)
+stop_remove = StopWordsRemover(inputCol='token_text_re',outputCol='stop_token')
+count_vec = CountVectorizer(inputCol='stop_token',outputCol='c_vec')
+idf = IDF(inputCol='c_vec',outputCol='tfidf')
+
+from pyspark.ml.feature import VectorAssembler
+clean_up = VectorAssembler(inputCols=['tfidf','label'],outputCol='features')
+from pyspark.ml.classification import NaiveBayes
+nb=NaiveBayes()
+from pyspark.ml import Pipeline
+data_prep_pipe = Pipeline(stages=[regex_re,
+                                 stop_remove,count_vec,
+                                 idf,clean_up])
+cleaner = data_prep_pipe.fit(train_tweets)
+clean_tweets = cleaner.transform(train_tweets)
+clean_tweets = clean_tweets.select('label','features')
+training, test = clean_tweets.randomSplit([0.7,0.3])
+sentiment_model = nb.fit(training)
+test_results = sentiment_model.transform(test)
+
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+acc_eval = MulticlassClassificationEvaluator()
+acc = acc_eval.evaluate(test_results)
+print('ACC of NB model:%6.3f' %acc)
